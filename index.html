@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Mars Surface HUD</title>
+<link rel="icon" href="data:,">
+<!-- onnxruntime-web: local copy first (works offline), internet copy only as a fallback -->
+<script src="ort/ort.min.js"></script>
+<script>
+  window.ORT_LOCAL = typeof ort !== "undefined";
+  if (!window.ORT_LOCAL) document.write('<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"><\/script>');
+</script>
+<style>
+  :root {
+    --bg: #05070a;
+    --panel: #0e1319;
+    --line: #22303c;
+    --text: #e6edf3;
+    --muted: #8b9aa8;
+    --hud: #3cff8f;
+    --warn: #ffd23c;
+    --danger: #ff4a4a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
+  #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 2; overflow-y: auto; }
+  .card { width: 100%; max-width: 460px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 14px; margin: auto; }
+  h1 { font-size: 22px; letter-spacing: .5px; direction: ltr; text-align: center; color: var(--hud); }
+  .sub { color: var(--muted); text-align: center; font-size: 14px; }
+  #status { font-size: 14px; padding: 10px 12px; border-radius: 8px; background: #0a0f14; border: 1px solid var(--line); }
+  #status.ok { border-color: var(--hud); color: var(--hud); }
+  #status.bad { border-color: var(--warn); color: var(--warn); }
+  button { font: inherit; font-size: 16px; padding: 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: #16202a; color: var(--text); cursor: pointer; }
+  button.primary { background: var(--hud); color: #04150b; border-color: var(--hud); font-weight: 700; }
+  label.file { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+  label.check { font-size: 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  label.check input { width: 18px; height: 18px; accent-color: var(--hud); }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.8; }
+  .note { font-size: 12px; color: var(--warn); line-height: 1.8; border-top: 1px solid var(--line); padding-top: 10px; }
+  #view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: none; background: #000; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #cam { display: none; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <div class="card">
+    <h1>MARS SURFACE HUD</h1>
+    <p class="sub">محاكاة خوذة رائد فضاء: كشف العوائق، تقييم الخطر، وتوجيه بصري</p>
+    <p id="status">جاري تحميل الموديل...</p>
+    <label class="check"><input type="checkbox" id="vrMode"> عرض مزدوج للنظارة (VR)</label>
+    <label class="check"><input type="checkbox" id="autoDemo"> سيناريو أعطال تلقائي للعرض (تسرب ثم انقطاع اتصال)</label>
+    <button id="btnCam" class="primary">تشغيل الكاميرا</button>
+    <label class="file">أو اختاروا صور أو فيديو للتجربة (تقدرون تختارون أكثر من صورة):
+      <input type="file" id="mediaFile" accept="image/*,video/*" multiple>
+    </label>
+    <label class="file">ملف الموديل (.onnx) لو ما انحمل تلقائيًا:
+      <input type="file" id="modelFile" accept=".onnx">
+    </label>
+    <p class="hint">
+      أثناء التشغيل: لمسة أو Space = الصورة التالية · لمستين أو Esc = القائمة<br>
+      أعطال للعرض بالجوال: ضغطة طويلة على الشاشة = تسرب ← ثم انقطاع اتصال ← ثم رجوع طبيعي<br>
+      أعطال للعرض بالكيبورد: <b>1</b> تسرب · <b>2</b> انقطاع الاتصال · <b>0</b> إعادة ضبط<br>
+      السيناريو التلقائي (دورة دقيقتين): أول 30 ثانية طبيعي، بعدها تسرب، وبعد 55 ثانية ينقطع الاتصال، وبعد 80 ثانية يرجع كل شي طبيعي
+    </p>
+    <p class="note">
+      الموديل مدرب على صور من سطح القمر ولم يُختبر على تضاريس المريخ.
+      قراءات البدلة والأكسجين والاتصال محاكاة، وقيم جو المريخ مرجعية وليست من حساسات.
+      حجم الجسم في الصورة ليس قياسًا لمسافته. التوجيه بصري فقط وليس ملاحة مُتحقق منها.
+    </p>
+  </div>
+</div>
+
+<canvas id="view" dir="ltr"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+
+<script>
+// =====================================================================
+// الإعدادات - هذا الجزء الوحيد اللي تحتاجون تعدلونه
+// =====================================================================
+const CONFIG = {
+  // ---- الموديل ----
+  MODEL_URL: "best.onnx",            // اسم ملف الموديل بجانب هذي الصفحة
+  INPUT_SIZE: 416,                   // الصفحة تكتشف الحجم الصحيح من الموديل تلقائيًا
+  CLASS_NAMES: ["boulder", "rocks"], // من ناتج القسم 13 في النوتبوك (لو غيرتوا الداتا غيروه)
+  CONF_THRESHOLD: 0.35,              // أقل ثقة لقبول الاكتشاف
+  IOU_THRESHOLD: 0.45,               // لإزالة المربعات المكررة
+
+  // ---- تقييم الخطر (قواعد بسيطة) ----
+  // المستوى الأساسي لكل فئة يعرفها الموديل: 0 منخفض (أخضر)، 1 حذر (أصفر)، 2 عالي (أحمر)
+  CLASS_RISK: { boulder: 2, rocks: 1 },
+  DEFAULT_RISK: 1,          // لأي فئة مو مذكورة فوق
+  PATH_ZONE: [1 / 3, 2 / 3], // الثلث الأوسط من الصورة = ممر المشي
+  NEAR_Y: 0.65,             // أسفل المربع تحت 65% من ارتفاع الصورة = في الجزء السفلي من المشهد
+  BIG_AREA: 0.06,           // المربع يغطي 6% أو أكثر من الصورة = كبير في الصورة
+  SMALL_AREA: 0.01,         // المربع يغطي أقل من 1% = صغير في الصورة
+
+  // ---- التوجيه (يسار / وسط / يمين) ----
+  RISK_WEIGHT: [0.3, 1, 3], // نقاط كل مستوى خطر داخل المنطقة
+  CENTER_CLEAR: 1.5,        // نقاط الوسط أقل من هذا = الطريق سالك
+  SIDE_BLOCKED: 3,          // نقاط الجانب من هذا وفوق = الجانب مسدود
+  SIDE_BETTER: 0.6,         // الجانب لازم يكون أقل من 60% من نقاط الوسط عشان ننصح فيه
+  STABLE_FRAMES: 4,         // نفس القرار يتكرر كم مرة قبل ما يتغير على الشاشة (يمنع الرجفة)
+
+  // ---- قراءات محاكاة (ما فيه حساسات حقيقية) ----
+  SIM_SPEED: 30,            // ساعة المحاكاة أسرع 30 مرة عشان الأكسجين ينقص بشكل واضح أثناء العرض
+  MARS_TEMP_C: -63,         // متوسط حرارة سطح المريخ (مرجعي)
+  MARS_PRESS_PA: 610,       // متوسط ضغط سطح المريخ (مرجعي)
+  SUIT_TEMP_C: 22,
+  SUIT_PRESS_KPA: 29.6,     // ضغط تشغيل بدلة NASA EMU (4.3 psi)
+  O2_CAPACITY_MIN: 480,     // 8 ساعات أكسجين أساسي (EMU)
+  // حدود التنبيه: قيم للعرض فقط، مو معايير NASA
+  SUIT_PRESS_CAUTION: 27, SUIT_PRESS_DANGER: 24,
+  O2_CAUTION: 30, O2_DANGER: 15,
+  COMM_CAUTION: 40, COMM_DANGER: 15,
+  LEAK_KPA_PER_S: 0.12,     // سرعة نزول الضغط في محاكاة التسرب
+  LEAK_O2_FACTOR: 8,        // استهلاك الأكسجين يتضاعف كم مرة أثناء التسرب
+  DEMO_CYCLE_S: 120,        // طول دورة السيناريو التلقائي بالثواني
+
+  // ---- العرض ----
+  EYE_SHIFT: 0.015,         // إزاحة الـ HUD بين العينين لإحساس العمق
+  INVERT_ROLL: false        // لو خط الأفق يميل بعكس الاتجاه، خلوها true
+};
+
+const COLORS = { hud: "#3cff8f", warn: "#ffd23c", danger: "#ff4a4a", dim: "rgba(60,255,143,0.5)" };
+const LEVEL_COLOR = [COLORS.hud, COLORS.warn, COLORS.danger];
+const LEVEL_NAME = ["LOW", "CAUTION", "HIGH"];
+
+// =====================================================================
+// معالجة مخرجات الموديل (YOLOv8 ONNX)
+// =====================================================================
+
+// letterbox: نصغّر الصورة ونحطها في مربع مع حواف رمادية بدون تشويه (نفس طريقة Ultralytics)
+function letterboxMeta(vw, vh, size) {
+  const scale = Math.min(size / vw, size / vh);
+  const nw = Math.round(vw * scale), nh = Math.round(vh * scale);
+  return { scale, padX: (size - nw) / 2, padY: (size - nh) / 2, nw, nh, vw, vh };
+}
+
+function iou(a, b) {
+  const x1 = Math.max(a.x1, b.x1), y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2), y2 = Math.min(a.y2, b.y2);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const ua = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter;
+  return ua > 0 ? inter / ua : 0;
+}
+
+function nms(boxes, iouThr) {
+  boxes.sort((a, b) => b.score - a.score);
+  const keep = [];
+  for (const b of boxes) {
+    if (keep.every(k => k.cls !== b.cls || iou(k, b) < iouThr)) keep.push(b);
+  }
+  return keep;
+}
+
+// المخرج شكله [1, 4+classes, N] (أو مقلوب). كل عمود = مربع مرشح
+function postprocess(data, dims, meta, cfg) {
+  let C = dims[1], N = dims[2], transposed = false;
+  if (C > N) { [C, N] = [N, C]; transposed = true; }
+  const get = transposed ? (ch, i) => data[i * C + ch] : (ch, i) => data[ch * N + i];
+  const nc = cfg.CLASS_NAMES.length || (C - 4);
+
+  const boxes = [];
+  for (let i = 0; i < N; i++) {
+    let best = 0, cls = -1;
+    for (let c = 0; c < nc; c++) {
+      const s = get(4 + c, i);
+      if (s > best) { best = s; cls = c; }
+    }
+    if (best < cfg.CONF_THRESHOLD) continue;
+    const cx = get(0, i), cy = get(1, i), w = get(2, i), h = get(3, i);
+    // نرجع الإحداثيات من مربع الـ letterbox إلى الصورة الأصلية، ثم نسبة من 0 إلى 1
+    const x1 = (cx - w / 2 - meta.padX) / meta.scale / meta.vw;
+    const y1 = (cy - h / 2 - meta.padY) / meta.scale / meta.vh;
+    const x2 = (cx + w / 2 - meta.padX) / meta.scale / meta.vw;
+    const y2 = (cy + h / 2 - meta.padY) / meta.scale / meta.vh;
+    boxes.push({
+      x1: clamp(x1, 0, 1), y1: clamp(y1, 0, 1), x2: clamp(x2, 0, 1), y2: clamp(y2, 0, 1),
+      score: best, cls, name: cfg.CLASS_NAMES[cls] || ("class " + cls)
+    });
+  }
+  return nms(boxes, cfg.IOU_THRESHOLD);
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// =====================================================================
+// تقييم الخطر: قواعد واضحة تنشرح في العرض
+//   1) كل فئة لها مستوى أساسي (CLASS_RISK)
+//   2) +1 لو الجسم في ممر المشي (الثلث الأوسط) وكبير في الصورة أو في الجزء السفلي منها
+//   3) -1 لو الجسم صغير في الصورة وفي الجزء العلوي منها
+// ملاحظة: حجم المربع وموقعه في الصورة مو قياس مسافة حقيقية
+// =====================================================================
+function assessHazards(dets, cfg) {
+  const [pa, pb] = cfg.PATH_ZONE;
+  return dets.map(d => {
+    const w = Math.max(d.x2 - d.x1, 1e-6), area = w * (d.y2 - d.y1);
+    const overlap = Math.max(0, Math.min(pb, d.x2) - Math.max(pa, d.x1));
+    const inPath = overlap >= 0.3 * w || overlap >= 0.5 * (pb - pa);
+    const low = d.y2 >= cfg.NEAR_Y;
+    const big = area >= cfg.BIG_AREA;
+    const small = area < cfg.SMALL_AREA;
+    const base = cfg.CLASS_RISK[d.name] ?? cfg.DEFAULT_RISK;
+    let level = base, why = "CLASS";
+    if (inPath && (low || big)) { level += 1; why = "IN PATH"; }
+    else if (small && !low) { level -= 1; why = "SMALL IN VIEW"; }
+    return { ...d, base, level: clamp(level, 0, 2), inPath, why };
+  });
+}
+
+// كل خطر يعطي نقاط للمناطق اللي يغطيها: وزن المستوى × نسبة عرض الجسم داخل المنطقة
+function zoneScores(hazards, cfg) {
+  const edges = [0, cfg.PATH_ZONE[0], cfg.PATH_ZONE[1], 1];
+  const s = [0, 0, 0];
+  for (const h of hazards) {
+    const w = Math.max(h.x2 - h.x1, 1e-6);
+    for (let z = 0; z < 3; z++) {
+      const ov = Math.max(0, Math.min(edges[z + 1], h.x2) - Math.max(edges[z], h.x1));
+      s[z] += cfg.RISK_WEIGHT[h.level] * ov / w;
+    }
+  }
+  return s;
+}
+
+function zoneLevel(score, cfg) {
+  return score < cfg.CENTER_CLEAR ? 0 : score < cfg.SIDE_BLOCKED ? 1 : 2;
+}
+
+// القرار: الوسط سالك؟ لا → هل فيه جانب أفضل بوضوح؟ لا → توقف
+function chooseDirection(scores, cfg) {
+  const [l, c, r] = scores;
+  if (c < cfg.CENTER_CLEAR) return "CLEAR";
+  const side = l <= r ? "LEFT" : "RIGHT", best = Math.min(l, r);
+  if (best < cfg.SIDE_BLOCKED && best <= c * cfg.SIDE_BETTER) return side;
+  return "STOP";
+}
+
+// يمنع تذبذب القرار: يتغير بس لو القرار الجديد تكرر عدة مرات متتالية
+function makeStabilizer(n) {
+  let current = "CLEAR", cand = null, count = 0;
+  return action => {
+    if (action === current) { cand = null; count = 0; return current; }
+    if (action === cand) count++; else { cand = action; count = 1; }
+    if (count >= n) { current = action; cand = null; count = 0; }
+    return current;
+  };
+}
+
+// =====================================================================
+// قراءات البدلة والبيئة: محاكاة فقط (ما فيه حساسات)
+// =====================================================================
+function initTelemetry(cfg) {
+  return {
+    simMin: 0, extTemp: cfg.MARS_TEMP_C, extPress: cfg.MARS_PRESS_PA,
+    suitTemp: cfg.SUIT_TEMP_C, suitPress: cfg.SUIT_PRESS_KPA,
+    o2: 100, o2Rate: 100 / cfg.O2_CAPACITY_MIN, comm: 85, leak: false, commLoss: false
+  };
+}
+
+function stepTelemetry(t, dt, cfg, rnd = Math.random) {
+  const dMin = dt * cfg.SIM_SPEED / 60;          // دقائق محاكاة مرت
+  t.simMin += dMin;
+  const sol = 2 * Math.PI * t.simMin / 1477;     // يوم المريخ ≈ 1477 دقيقة
+  t.extTemp = cfg.MARS_TEMP_C + 12 * Math.sin(sol) + (rnd() - 0.5) * 0.4;
+  t.extPress = cfg.MARS_PRESS_PA + 10 * Math.sin(2 * sol + 1) + (rnd() - 0.5) * 1.5;
+  t.suitTemp += (cfg.SUIT_TEMP_C - t.suitTemp) * Math.min(1, dt * 0.2) + (rnd() - 0.5) * 0.05;
+  if (t.leak) t.suitPress = Math.max(0, t.suitPress - cfg.LEAK_KPA_PER_S * dt);
+  else t.suitPress += (cfg.SUIT_PRESS_KPA - t.suitPress) * Math.min(1, dt * 0.5);
+  t.o2Rate = (100 / cfg.O2_CAPACITY_MIN) * (t.leak ? cfg.LEAK_O2_FACTOR : 1); // % لكل دقيقة محاكاة
+  t.o2 = Math.max(0, t.o2 - t.o2Rate * dMin);
+  const commTarget = t.commLoss ? 0 : 80 + 12 * Math.sin(t.simMin / 7);
+  t.comm = clamp(t.comm + (commTarget - t.comm) * Math.min(1, dt * (t.commLoss ? 1.5 : 0.5)) + (rnd() - 0.5) * 2, 0, 100);
+  return t;
+}
+
+// السيناريو التلقائي: 0-30 ث طبيعي، 30-80 تسرب، 55-80 انقطاع اتصال، بعدها طبيعي لين تخلص الدورة
+function demoFaults(sec, cfg) {
+  const ph = sec % cfg.DEMO_CYCLE_S;
+  return { leak: ph >= 30 && ph < 80, commLoss: ph >= 55 && ph < 80 };
+}
+
+function telemetryStatus(t, cfg) {
+  const below = (v, caution, danger) => v < danger ? 2 : v < caution ? 1 : 0;
+  const st = {
+    suitPress: below(t.suitPress, cfg.SUIT_PRESS_CAUTION, cfg.SUIT_PRESS_DANGER),
+    o2: below(t.o2, cfg.O2_CAUTION, cfg.O2_DANGER),
+    comm: below(t.comm, cfg.COMM_CAUTION, cfg.COMM_DANGER),
+    suitTemp: (t.suitTemp < 10 || t.suitTemp > 35) ? 2 : (t.suitTemp < 18 || t.suitTemp > 27) ? 1 : 0
+  };
+  const alarms = [];
+  if (st.suitPress) alarms.push({ level: st.suitPress, msg: "SUIT PRESSURE LOW" });
+  if (st.o2) alarms.push({ level: st.o2, msg: "O2 LOW" });
+  if (st.comm) alarms.push({ level: st.comm, msg: st.comm === 2 ? "COMM LOSS" : "COMM WEAK" });
+  if (st.suitTemp) alarms.push({ level: st.suitTemp, msg: "SUIT TEMP" });
+  alarms.sort((a, b) => b.level - a.level);
+  return { st, alarms };
+}
+
+// =====================================================================
+// التطبيق
+// =====================================================================
+if (typeof document !== "undefined") {
+  const $ = id => document.getElementById(id);
+  const canvas = $("view"), ctx = canvas.getContext("2d");
+  const video = $("cam");
+  const statusEl = $("status");
+
+  const state = {
+    session: null, running: false, vr: false,
+    media: { kind: "none", images: [], idx: 0, urls: [] },
+    raw: [], hazards: [], scores: [0, 0, 0], action: "CLEAR", inferredFor: null,
+    modelMs: 0, roll: 0, motionSeen: false, lastFrame: 0,
+    tel: initTelemetry(CONFIG), telStatus: { st: {}, alarms: [] }
+  };
+  window.__hud = state; // للفحص من الـ Console فقط
+  let stabilize = makeStabilizer(CONFIG.STABLE_FRAMES);
+
+  const prepCanvas = document.createElement("canvas");
+  prepCanvas.width = prepCanvas.height = CONFIG.INPUT_SIZE;
+  const prepCtx = prepCanvas.getContext("2d", { willReadFrequently: true });
+
+  function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+
+  // ---------- مصدر الصورة: كاميرا أو فيديو أو صور ----------
+  function mediaEl() {
+    const m = state.media;
+    return m.kind === "images" ? m.images[m.idx] : video;
+  }
+  function mediaSize() {
+    const el = mediaEl();
+    if (!el) return [0, 0];
+    return el === video ? [video.videoWidth, video.videoHeight] : [el.naturalWidth, el.naturalHeight];
+  }
+  function loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image(), url = URL.createObjectURL(file);
+      state.media.urls.push(url);
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = url;
+    });
+  }
+  function stepImage(delta) {
+    const m = state.media;
+    if (m.kind !== "images" || m.images.length < 2) return;
+    m.idx = (m.idx + delta + m.images.length) % m.images.length;
+    state.raw = [];
+  }
+
+  // ---------- تحميل الموديل ----------
+  const ORT_OK = typeof ort !== "undefined";
+  if (ORT_OK) {
+    ort.env.wasm.wasmPaths = window.ORT_LOCAL ? new URL("ort/", location.href).href : "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+    ort.env.wasm.numThreads = 1;
+  }
+  const runtimeNote = window.ORT_LOCAL ? " · يشتغل محليًا بدون إنترنت" : " · مكتبة التشغيل من الإنترنت";
+
+  async function loadModel(buffer, label) {
+    if (!ORT_OK) { setStatus("مكتبة onnxruntime ما انحملت. تأكدوا إن مجلد ort موجود بجانب الصفحة.", "bad"); return; }
+    try {
+      const session = await ort.InferenceSession.create(buffer, { executionProviders: ["wasm"] });
+      const probe = await detectInputSize(session);
+      if (!probe) throw new Error("could not detect model input size");
+      // الحجم ينقرأ من الموديل نفسه، فما يهم لو INPUT_SIZE في CONFIG ما يطابق
+      CONFIG.INPUT_SIZE = probe.size;
+      prepCanvas.width = prepCanvas.height = probe.size;
+      state.session = session;
+      state.inferredFor = null;
+      const nc = probe.channels - 4;
+      const warn = nc !== CONFIG.CLASS_NAMES.length
+        ? " · تنبيه: الموديل فيه " + nc + " فئات، و CLASS_NAMES فيها " + CONFIG.CLASS_NAMES.length : "";
+      setStatus("الموديل جاهز: " + label + " · حجم الإدخال " + probe.size + runtimeNote + warn, warn ? "bad" : "ok");
+    } catch (e) {
+      console.error(e);
+      setStatus("تعذر تحميل الموديل. تأكدوا إنه ملف ONNX مصدّر من النوتبوك.", "bad");
+    }
+  }
+
+  // نجرب أحجام الإدخال الشائعة لين نلقى الحجم اللي صُدّر فيه الموديل
+  async function detectInputSize(session) {
+    const sizes = [...new Set([CONFIG.INPUT_SIZE, 320, 416, 480, 512, 640])];
+    for (const S of sizes) {
+      try {
+        const feeds = { [session.inputNames[0]]: new ort.Tensor("float32", new Float32Array(3 * S * S), [1, 3, S, S]) };
+        const out = (await session.run(feeds))[session.outputNames[0]];
+        return { size: S, channels: Math.min(out.dims[1], out.dims[2]) };
+      } catch (_) { /* not this size */ }
+    }
+    return null;
+  }
+
+  if (location.protocol === "file:") {
+    setStatus("افتحوا الصفحة عن طريق serve.py (أو أي سيرفر محلي)، مو بالضغط المزدوج على الملف.", "bad");
+  } else {
+    fetch(CONFIG.MODEL_URL)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then(buf => loadModel(buf, CONFIG.MODEL_URL))
+      .catch(() => setStatus("ما لقينا " + CONFIG.MODEL_URL + " بجانب الصفحة. اختاروا الملف يدويًا، أو شغّلوا بدون موديل لتجربة الواجهة.", "bad"));
+  }
+
+  $("modelFile").addEventListener("change", async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    setStatus("جاري تحميل " + f.name + "...");
+    await loadModel(await f.arrayBuffer(), f.name);
+  });
+
+  // ---------- التشغيل ----------
+  $("btnCam").onclick = () => start("camera");
+  $("mediaFile").addEventListener("change", e => {
+    const files = [...e.target.files];
+    e.target.value = "";
+    if (files.length) start("files", files);
+  });
+
+  async function start(kind, files) {
+    state.vr = $("vrMode").checked;
+    // iPhone يطلب إذن الحساسات
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) {
+      try { await DeviceMotionEvent.requestPermission(); } catch (_) {}
+    }
+    const m = state.media;
+    try {
+      if (kind === "camera") {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        m.kind = "camera";
+      } else {
+        const vid = files.find(f => f.type.startsWith("video/"));
+        const imgs = files.filter(f => f.type.startsWith("image/"));
+        if (vid) {
+          const url = URL.createObjectURL(vid);
+          m.urls.push(url);
+          video.srcObject = null;
+          video.src = url;
+          video.loop = true;
+          await video.play();
+          m.kind = "video";
+        } else if (imgs.length) {
+          m.images = await Promise.all(imgs.map(loadImage));
+          m.idx = 0;
+          m.kind = "images";
+        } else throw new Error("unsupported file");
+      }
+    } catch (e) {
+      console.error(e);
+      setStatus(kind === "camera"
+        ? "ما قدرنا نفتح الكاميرا. تأكدوا من الإذن، وإن الرابط localhost أو HTTPS."
+        : "ما قدرنا نفتح الملف. جربوا صور JPG/PNG أو فيديو MP4.", "bad");
+      return;
+    }
+    if (state.vr) {
+      try { await document.documentElement.requestFullscreen(); } catch (_) {}
+      try { await screen.orientation.lock("landscape"); } catch (_) {}
+    }
+    try { state.wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
+
+    $("menu").style.display = "none";
+    canvas.style.display = "block";
+    state.raw = []; state.hazards = []; state.scores = [0, 0, 0]; state.action = "CLEAR"; state.inferredFor = null;
+    stabilize = makeStabilizer(CONFIG.STABLE_FRAMES);
+    state.tel = initTelemetry(CONFIG);
+    state.autoDemo = $("autoDemo").checked;
+    state.demoT = 0;
+    state.running = true;
+    state.lastFrame = performance.now();
+    requestAnimationFrame(loop);
+    inferLoop();
+  }
+
+  function stop() {
+    state.running = false;
+    if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    const m = state.media;
+    m.urls.forEach(u => URL.revokeObjectURL(u));
+    Object.assign(m, { kind: "none", images: [], idx: 0, urls: [] });
+    if (state.wakeLock) state.wakeLock.release().catch(() => {});
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    canvas.style.display = "none";
+    $("menu").style.display = "flex";
+  }
+
+  // لمسة = الصورة التالية، لمستين = رجوع للقائمة، ضغطة طويلة = العطل التالي
+  function cycleFault() {
+    const t = state.tel;
+    if (!t.leak && !t.commLoss) t.leak = true;
+    else if (!t.commLoss) t.commLoss = true;
+    else state.tel = initTelemetry(CONFIG);
+    if (navigator.vibrate) navigator.vibrate(60);
+  }
+  let lastTap = 0, downAt = 0;
+  canvas.addEventListener("pointerdown", () => { downAt = performance.now(); });
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("pointerup", () => {
+    const now = performance.now();
+    if (now - downAt > 700) { cycleFault(); lastTap = 0; return; }
+    if (now - lastTap < 350) stop(); else stepImage(1);
+    lastTap = now;
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement && state.running && state.vr) stop();
+  });
+  document.addEventListener("keydown", e => {
+    if (!state.running) return;
+    const t = state.tel;
+    if (e.key === "Escape") stop();
+    else if (e.key === " " || e.key === "ArrowRight") { e.preventDefault(); stepImage(1); }
+    else if (e.key === "ArrowLeft") stepImage(-1);
+    else if (e.key === "1") t.leak = !t.leak;
+    else if (e.key === "2") t.commLoss = !t.commLoss;
+    else if (e.key === "0") state.tel = initTelemetry(CONFIG);
+  });
+
+  // ---------- حساس الميلان (لو موجود، مثل الجوال داخل النظارة) ----------
+  window.addEventListener("devicemotion", e => {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    state.motionSeen = true;
+    const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    let roll = Math.atan2(a.x, a.y) * 180 / Math.PI - angle;
+    roll = ((roll + 540) % 360) - 180;
+    if (CONFIG.INVERT_ROLL) roll = -roll;
+    state.roll = state.roll * 0.85 + roll * 0.15; // تنعيم
+  });
+
+  // ---------- تشغيل الموديل (منفصل عن الرسم عشان الصورة تبقى سلسة) ----------
+  async function inferLoop() {
+    while (state.running) {
+      const el = mediaEl(), [vw, vh] = mediaSize();
+      // الصورة الثابتة نحللها مرة وحدة بس
+      const already = state.media.kind === "images" && state.inferredFor === el;
+      if (state.session && vw && !already) {
+        const t0 = performance.now();
+        try {
+          const meta = letterboxMeta(vw, vh, CONFIG.INPUT_SIZE);
+          const S = CONFIG.INPUT_SIZE;
+          prepCtx.fillStyle = "rgb(114,114,114)";
+          prepCtx.fillRect(0, 0, S, S);
+          prepCtx.drawImage(el, meta.padX, meta.padY, meta.nw, meta.nh);
+          const px = prepCtx.getImageData(0, 0, S, S).data;
+          const input = new Float32Array(3 * S * S);
+          for (let i = 0, p = 0; i < S * S; i++, p += 4) {
+            input[i] = px[p] / 255;
+            input[S * S + i] = px[p + 1] / 255;
+            input[2 * S * S + i] = px[p + 2] / 255;
+          }
+          const feeds = { [state.session.inputNames[0]]: new ort.Tensor("float32", input, [1, 3, S, S]) };
+          const out = (await state.session.run(feeds))[state.session.outputNames[0]];
+          if (mediaEl() === el) {
+            state.raw = postprocess(out.data, out.dims, meta, CONFIG);
+            if (state.media.kind === "images") state.inferredFor = el;
+          }
+        } catch (e) { console.error(e); }
+        state.modelMs = performance.now() - t0;
+      }
+      state.hazards = assessHazards(state.raw, CONFIG);
+      state.scores = zoneScores(state.hazards, CONFIG);
+      state.action = stabilize(chooseDirection(state.scores, CONFIG));
+      await new Promise(r => setTimeout(r, 15));
+    }
+  }
+
+  // ---------- الرسم ----------
+  function loop(now) {
+    if (!state.running) return;
+    const dt = Math.min(0.1, (now - state.lastFrame) / 1000);
+    state.lastFrame = now;
+    if (state.autoDemo) {
+      state.demoT += dt;
+      const f = demoFaults(state.demoT, CONFIG);
+      if (state.tel.leak && !f.leak) state.tel = initTelemetry(CONFIG); // العطل انتهى: البدلة ترجع طبيعية
+      state.tel.leak = f.leak;
+      state.tel.commLoss = f.commLoss;
+    }
+    stepTelemetry(state.tel, dt, CONFIG);
+    state.telStatus = telemetryStatus(state.tel, CONFIG);
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = Math.round(window.innerWidth * dpr), H = Math.round(window.innerHeight * dpr);
+    if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+
+    if (state.vr) {
+      const ew = W / 2;
+      drawEye(0, ew, H, +1, now);
+      drawEye(ew, ew, H, -1, now);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(ew - 2 * dpr, 0, 4 * dpr, H);
+    } else {
+      drawEye(0, W, H, 0, now);
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function drawEye(x0, ew, eh, eye, now) {
+    const el = mediaEl(), [vw, vh] = mediaSize();
+    const u = eh / 100; // وحدة قياس نسبية
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0, 0, ew, eh); ctx.clip();
+    ctx.lineWidth = Math.max(1.5, u * 0.35);
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,0.85)";
+    ctx.shadowBlur = u * 0.6;
+    if (!vw) {
+      text("WAITING FOR VIDEO...", x0 + ew / 2, eh / 2, u * 3, COLORS.dim, "center");
+      ctx.restore();
+      return;
+    }
+
+    // نقص من وسط الصورة بنفس نسبة أبعاد العين
+    const eyeAspect = ew / eh, camAspect = vw / vh;
+    let sw = vw, sh = vh;
+    if (camAspect > eyeAspect) sw = vh * eyeAspect; else sh = vw / eyeAspect;
+    const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+    ctx.drawImage(el, sx, sy, sw, sh, x0, 0, ew, eh);
+
+    // تحويل من نسبة الصورة الأصلية إلى بكسل داخل العين
+    const shift = eye * CONFIG.EYE_SHIFT * ew;
+    const toX = nx => x0 + ((nx * vw - sx) / sw) * ew + shift;
+    const toY = ny => ((ny * vh - sy) / sh) * eh;
+    const cx = x0 + ew / 2 + shift, cy = eh / 2;
+
+    // 1) حدود مناطق التوجيه (يسار / وسط / يمين)
+    ctx.save();
+    ctx.setLineDash([u, u * 1.5]);
+    ctx.strokeStyle = "rgba(60,255,143,0.25)";
+    for (const zx of CONFIG.PATH_ZONE) line(toX(zx), toY(0.45), toX(zx), toY(1));
+    ctx.restore();
+
+    // 2) المخاطر المكتشفة، ملونة حسب مستوى الخطر
+    for (const d of state.hazards) {
+      const color = LEVEL_COLOR[d.level];
+      const bx1 = toX(d.x1), by1 = toY(d.y1), bx2 = toX(d.x2), by2 = toY(d.y2);
+      brackets(bx1, by1, bx2, by2, color, Math.min(bx2 - bx1, by2 - by1) * 0.3);
+      text(d.name.toUpperCase() + " " + Math.round(d.score * 100) + "% " + LEVEL_NAME[d.level],
+        bx1, Math.max(u * 2, by1 - u * 1.6), u * 1.9, color, "left");
+    }
+
+    // 3) التوجيه في الأعلى
+    const act = {
+      CLEAR: ["PATH CLEAR", COLORS.hud],
+      LEFT: ["<  MOVE LEFT", COLORS.warn],
+      RIGHT: ["MOVE RIGHT  >", COLORS.warn],
+      STOP: ["STOP - OBSTACLE AHEAD", COLORS.danger]
+    }[state.action];
+    text(act[0], cx, eh * 0.08, u * 4, act[1], "center", true);
+    text("VISUAL GUIDANCE ONLY - NOT VERIFIED NAVIGATION", cx, eh * 0.135, u * 1.6, COLORS.dim, "center");
+
+    // 4) إنذار البدلة (الأخطر أولًا)
+    const alarms = state.telStatus.alarms;
+    if (alarms.length) {
+      const a = alarms[0];
+      const blink = a.level === 2 && Math.floor(now / 400) % 2 === 0;
+      const msg = "!! " + a.msg + (alarms.length > 1 ? "  (+" + (alarms.length - 1) + ")" : "");
+      if (!blink) text(msg, cx, eh * 0.2, u * 3, LEVEL_COLOR[a.level], "center", true);
+    }
+
+    // 5) العلامة الثابتة في المنتصف + خط الأفق لو فيه حساس ميلان
+    if (state.motionSeen) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-state.roll * Math.PI / 180);
+      ctx.strokeStyle = COLORS.dim;
+      line(-ew * 0.3, 0, -ew * 0.1, 0); line(ew * 0.1, 0, ew * 0.3, 0);
+      ctx.restore();
+    }
+    ctx.strokeStyle = COLORS.hud;
+    line(cx - u * 5, cy, cx - u * 1.5, cy); line(cx + u * 1.5, cy, cx + u * 5, cy); line(cx, cy - u * 1.5, cx, cy + u * 1.5);
+
+    // 6) لوحة البيئة (يسار) ولوحة البدلة (يمين)
+    const t = state.tel, st = state.telStatus.st;
+    const o2Left = t.o2Rate > 0 ? t.o2 / t.o2Rate : 0;
+    const hhmm = mins => Math.floor(mins / 60) + ":" + String(Math.floor(mins % 60)).padStart(2, "0");
+    telPanel(x0 + ew * 0.04 + shift, eh * 0.3, "left", "MARS ENV - REF", [
+      ["EXT TEMP", t.extTemp.toFixed(0) + "°C", 0],
+      ["EXT PRESS", Math.round(t.extPress) + " Pa", 0]
+    ], u, ew);
+    telPanel(x0 + ew * 0.96 + shift, eh * 0.3, "right", "SUIT - SIM", [
+      ["SUIT TEMP", t.suitTemp.toFixed(1) + "°C", st.suitTemp],
+      ["SUIT PRESS", t.suitPress.toFixed(1) + " kPa", st.suitPress],
+      ["O2 LEFT", Math.round(t.o2) + "%  " + hhmm(o2Left), st.o2],
+      ["COMM", Math.round(t.comm) + "%  " + bars(t.comm), st.comm]
+    ], u, ew);
+
+    // 7) شريط المناطق: لون كل منطقة حسب نقاط الخطر فيها
+    const zw = u * 7, zy = eh * 0.84;
+    ["L", "C", "R"].forEach((lbl, i) => {
+      const zx = cx + (i - 1) * (zw + u);
+      const color = LEVEL_COLOR[zoneLevel(state.scores[i], CONFIG)];
+      ctx.strokeStyle = color;
+      ctx.strokeRect(zx - zw / 2, zy - u * 1.6, zw, u * 3.2);
+      text(lbl, zx, zy, u * 2, color, "center", true);
+    });
+
+    // 8) معلومات أسفل الشاشة
+    const n = [0, 0, 0];
+    state.hazards.forEach(h => n[h.level]++);
+    const info = "HAZARDS " + state.hazards.length + " (H" + n[2] + " C" + n[1] + " L" + n[0] + ")" +
+      (state.session ? "   AI " + Math.round(state.modelMs) + " ms" : "   NO MODEL") +
+      (state.autoDemo ? "   AUTO DEMO" : "");
+    text(info, cx, eh * 0.91, u * 1.9, COLORS.dim, "center");
+    text("LUNAR-TRAINED MODEL - NOT MARS-VALIDATED - SIMULATED TELEMETRY", cx, eh * 0.955, u * 1.5, COLORS.dim, "center");
+
+    ctx.restore();
+  }
+
+  // ---------- أدوات رسم ----------
+  function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+  function text(str, x, y, size, color, align, bold) {
+    ctx.font = (bold ? "700 " : "600 ") + Math.round(size) + "px ui-monospace, Menlo, Consolas, monospace";
+    ctx.direction = "ltr"; // الصفحة RTL، بس نصوص الـ HUD إنجليزية وأرقام
+    ctx.textAlign = align; ctx.fillStyle = color; ctx.fillText(str, x, y);
+  }
+
+  function brackets(x1, y1, x2, y2, color, len) {
+    ctx.strokeStyle = color;
+    len = Math.max(len, 6);
+    for (const [x, y, dx, dy] of [[x1, y1, 1, 1], [x2, y1, -1, 1], [x1, y2, 1, -1], [x2, y2, -1, -1]]) {
+      line(x, y, x + dx * len, y); line(x, y, x, y + dy * len);
+    }
+  }
+
+  function bars(pct) {
+    const k = Math.round(clamp(pct, 0, 100) / 25);
+    return "|".repeat(k) + ".".repeat(4 - k);
+  }
+
+  function telPanel(x, y, align, title, rows, u, ew) {
+    const w = ew * 0.25, h = u * 4 + rows.length * u * 6.6;
+    const left = align === "left" ? x - u : x - w + u;
+    ctx.save();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(left, y - u * 2.5, w, h);
+    ctx.restore();
+    text(title, x, y, u * 1.6, COLORS.dim, align, true);
+    rows.forEach(([label, value, level], i) => {
+      const ry = y + u * 4 + i * u * 6.6;
+      text(label, x, ry, u * 1.6, COLORS.dim, align);
+      text(value, x, ry + u * 2.8, u * 2.6, LEVEL_COLOR[level || 0], align, true);
+    });
+  }
+}
+
+if (typeof module !== "undefined") module.exports = {
+  letterboxMeta, postprocess, nms, iou, assessHazards, zoneScores, zoneLevel, chooseDirection,
+  makeStabilizer, initTelemetry, stepTelemetry, telemetryStatus, demoFaults, CONFIG
+};
+</script>
+</body>
+</html>
